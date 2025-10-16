@@ -312,7 +312,8 @@ pre_process <- function(tracking_data){
 
 #write.csv(data, here("rawdata", "final_preprocessed_all_weeks_lag4.csv"), row.names = FALSE)
 
-data <- read.csv(here("rawdata", "final_preprocessed_all_weeks_lag4.csv"))
+
+data <- read.csv(here("rawdata/large", "final_preprocessed_all_weeks_lag4.csv"))
 
 # Model fitting -----------------------------------------------------------
 # Berechnung der Startverteilung für einen Verteidiger
@@ -510,6 +511,23 @@ Deltas <- do.call(rbind, lapply(split(data, data$uniId)[as.character(unique(data
 # rnames_new = rownames(Delta3)
 # 
 # data = data %>% filter(uniId %in% rnames_new) 
+
+
+# Compute pairwise distances between attackers
+Att_y <- as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att])
+pairs <- combn(n_att, 2)
+# Compute pairwise distances
+dist_mat <- sapply(1:ncol(pairs), function(k) {
+  i <- pairs[1, k]
+  j <- pairs[2, k]
+  abs(Att_y[, i] - Att_y[, j])
+})
+
+# Assign meaningful column names
+colnames(dist_mat) <- apply(pairs, 2, function(idx)
+  paste0("dist_y_", idx[1], "_", idx[2])
+)
+
 
 
 # Model fitting -----------------------------------------------------------
@@ -791,19 +809,54 @@ jnll = function(par){
   nll
 }
 
-obj2 <- MakeADFun(jnll, par, random = c("beta_club", "beta_pos"))
-print("done")
 
-# H <- obj2$env$spHess(random = TRUE)
-# SparseM::image(H)
+TMB::config(tmbad.sparse_hessian_compress=TRUE)
+TapeConfig(matmul="plain") ## unrelated, but seems beneficial when matrices a small
 
-system.time(
-  opt2 <- nlminb(obj2$par, obj2$fn, obj2$gr)
-)
+# obj2 <- MakeADFun(jnll, par, random = c("beta_club", "beta_pos"))
+# print("done")
+# 
+# # H <- obj2$env$spHess(random = TRUE)
+# # SparseM::image(H)
+# 
+# system.time(
+#   opt2 <- nlminb(obj2$par, obj2$fn, obj2$gr)
+# )
 
-mod2 <- obj2$report()
+# mod2 <- obj2$report()
 
-saveRDS(mod2, "./results/mod_w5to9.rds")
+
+
+# saveRDS(mod2, "./results/mod_full.rds")
+# saveRDS(mod2, "./results/mod_w5to9.rds")
+
+mod_full <- readRDS("./results/mod_full.rds")
+
+
+# state decoding
+
+stateprobs <- list()
+
+uID <- unique(dat$ID)
+i <- 1
+for(id in uID){
+  idx <- which(dat$ID == id)
+  club_i <- dat$club_num[idx[1]]
+  pos_i <- dat$pos_num[idx[1]]
+  
+  stateprobs[[i]] <- stateprobs(dat$Delta[i, ], mod_full$Gamma[,, club_i, pos_i], mod_full$allprobs[idx, ])
+  i <- i + 1
+}
+
+# turn into matrix
+stateprobs_mat <- do.call(rbind, stateprobs)
+colnames(stateprobs_mat) <- paste0("attacker_", 1:n_att)
+stateprobs_df <- as.data.frame(stateprobs_mat)
+
+saveRDS(stateprobs_df, "./results/stateprobs_full.rds")
+saveRDS(stateprobs_mat, "./results/stateprobs_full_mat.rds")
+
+
 
 mod14 <- readRDS("./results/mod_w1to4.rds")
 mod59 <- readRDS("./results/mod_w5to9.rds")
