@@ -576,8 +576,12 @@ trackID = mod$trackID
 (alpha = mod$alpha)
 
 probs = stateprobs(mod = mod)
+
+mod = readRDS("C:/Users/michels/sciebo/BDB 2025/mod_full.rds")
+probs = readRDS("C:/Users/michels/sciebo/BDB 2025/stateprobs_full.rds")
 colnames(probs) = paste0("attacker_", 1:n_att)
-probs = cbind(ID = trackID, probs)
+#probs = cbind(ID = trackID, probs)
+probs = cbind(ID = data$uniId, probs)
 
 probs = (split(as.data.frame(probs), probs[,1]))[as.character(unique(probs[,1]))]
 probs = lapply(probs, as.matrix)
@@ -623,6 +627,9 @@ results_df <- do.call(rbind, lapply(probs, analyze_data))
 results_df$gameId = str_sub(rownames(results_df), 1, 10)
 results_df$playId = str_sub(rownames(results_df), 11, str_length(rownames(results_df))-5)
 
+save(results_df, file = "HMM_features_lag_4.rds")
+save(probs, file = "stateprobs_with_ids.rds")
+
 res_df = results_df %>% group_by(gameId, playId) %>% 
   mutate(player_change = ifelse(num_changes > 0, 1, 0)) %>% 
   summarize(average = mean(num_changes),
@@ -634,6 +641,9 @@ res_df = results_df %>% group_by(gameId, playId) %>%
 res_df = merge(plays, res_df, by = c("gameId", "playId"))
 
 res_df = res_df %>% filter(pff_manZone != "Other")
+
+save(res_df, file = "HMM_features_lag_4_per_play.rds")
+
 
 # Visualize the frequency of categories by group
 ggplot(res_df %>% filter(pff_manZone != "Other"), aes(x = nr_player_changes, fill = pff_manZone)) +
@@ -832,12 +842,16 @@ names(beta_club) <- levels(data$club)
 beta_pos <- mod2$beta_pos
 names(beta_pos) <- levels(data$pos)
 
+mod2$beta_pos = beta_pos
+mod2[beta_club] = beta_club
+mod2$names_beta_club = names(beta_club)
+mod2$names_beta_pos = names(beta_pos)
 
-which.min(gammas)
-which.max(gammas)
+apply(gammas, 2, which.min)
+apply(gammas, 2, which.max)
 
-data$club[which(data$club_num == 14)[1]]
-data$club[which(data$club_num == 30)[1]]
+data$club[which(data$club_num == 28)[1]]
+data$club[which(data$club_num == 5)[1]]
 
 dim(mod2$Gamma)
 nrow(mod2$allprobs)
