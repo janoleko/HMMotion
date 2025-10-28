@@ -4,7 +4,6 @@
 
 library(dplyr)
 library(tidyverse)
-#devtools::install_github("janoleko/LaMa")
 library(LaMa)
 library(ggplot2)
 library(here)
@@ -199,11 +198,13 @@ data <- read.csv(here("rawdata/large", "final_preprocessed_all_weeks_lag4.csv"))
 # smaller data
 playIds <- unique(data$playId)
 set.seed(134)
-w <- sample(1:length(playIds), 200)
+w <- sample(1:length(playIds), 500)
 data <- data[which(data$playId %in% playIds[w]), ] # smaller data set
 
-# Model fitting -----------------------------------------------------------
-# Berechnung der Startverteilung für einen Verteidiger
+
+# Prepwork for model fitting ----------------------------------------------
+
+### Berechnung der Startverteilung für einen Verteidiger
 # Input:
 #   y_def: y-Koordinate des Verteidigers (ein Wert)
 #   y_att: numerischer Vektor mit y-Koordinaten der Angreifer
@@ -215,7 +216,7 @@ data <- data[which(data$playId %in% playIds[w]), ] # smaller data set
 n_att <- 5
 alpha <- 1  # Einflussparameter für Abstand
 
-#We initialize the defender-attacker assignments using a softmax over the negative vertical distances between players, 
+# We initialize the defender-attacker assignments using a softmax over the negative vertical distances between players, 
 # following standard probabilistic matching approaches (Bishop, 2006; Cuturi, 2013). The parameter𝛼
 # controls the sharpness of the distribution, with higher values leading to almost deterministic assignments.
 Deltas <- do.call(rbind, lapply(split(data, data$uniId)[as.character(unique(data$uniId))],
@@ -236,7 +237,8 @@ Deltas <- do.call(rbind, lapply(split(data, data$uniId)[as.character(unique(data
                                   scores / sum(scores)
                                 }))
 
-# Compute pairwise distances between attackers
+
+### Computing pairwise distances between attackers
 Att_y <- as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att])
 
 # All ordered pairs i != j
@@ -252,219 +254,13 @@ dist_mat <- sapply(1:nrow(pairs), function(k) {
 
 # Name the columns
 colnames(dist_mat) <- paste0("dist_y_", pairs$i, "_", pairs$j)
-
 head(dist_mat)
 
+rm(Att_y, pairs) # memory cleanup
+gc()
 
 
 # Model fitting -----------------------------------------------------------
-
-dat = list(y_pos = data$y,
-           X = as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att]),
-           dist_mat = dist_mat,
-           ID = data$uniId,
-           n_att = n_att, 
-           Delta = as.matrix(Deltas))
-
-par = list(beta = c(-4, 0),  # transition prob coefficients
-           logsigma = log(1))
-
-tpm_g3 <- function(Eta, byrow = FALSE) {
-  K <- ncol(Eta)
-  N <- 0.5 + sqrt(0.25 + K)
-  Gamma <- AD(array(1, dim = c(N, N, nrow(Eta))))
-  
-  expEta <- exp(Eta)
-  
-  ## Loop over entries (stuff over time happens vectorised which speeds up the tape)
-  col_ind <- 1
-  for(i in seq_len(N)){ # loop over rows
-    for(j in seq_len(N)){ # loop over columns
-      if(j != i){ # only if non-diagonal
-        if(byrow){
-          Gamma[i, j, ] <- expEta[, col_ind]
-        } else{
-          Gamma[j, i, ] <- expEta[, col_ind]
-        }
-        col_ind = col_ind + 1
-      }
-    }
-  }
-  # Normalise rows to sum to 1
-  for(i in seq_len(N)){
-    # transposing is necessary because Gamma[i,,] / colSums(Gamma[i,,]) does not work as expected
-    Gamma[i, , ] <- t(t(Gamma[i, , ]) / rowSums(t(Gamma[i, , ])))
-  }
-  Gamma
-}
-
-nll <- function(par){
-  getAll(par, dat)
-  
-  Gamma <- tpm_g3(beta[1] + beta[2] * dist_mat); REPORT(beta)
-  
-  sigma <- exp(logsigma)
-  
-  Mu = X
-  REPORT(Mu)
-  REPORT(alpha)
-  
-  allprobs = matrix(1, length(y_pos), n_att)
-  ind = which(!is.na(y_pos))
-  for(j in 1:n_att){
-    allprobs[ind,j] = dnorm(y_pos, Mu[,j], sigma)
-  }
-  
-  -forward_g(Delta, Gamma, allprobs, trackID = ID)
-}
-
-# # all off-diagonal probablities are the same
-# map = list(eta = factor(rep(1, n_att * (n_att - 1))))
-
-# Anzahl off-diagonal Elemente
-n_off <- n_att * (n_att - 1)
-
-# Wir wollen pro Diagonale einen eigenen Faktor (hier: 4 Diagonalen)
-# Diagonal-Index = (Spalte - Zeile)
-idx <- outer(1:n_att, 1:n_att, "-")  # Matrix mit Differenzen
-idx <- as.vector(idx)
-
-# Off-Diagonal-Indices herausfiltern
-off_diag <- which(idx != 0)
-diag_indices <- idx[off_diag]
-
-# Diagonal-Shift auf 1..(n_att-1)
-diag_indices <- abs(diag_indices)
-
-# Faktor für Mapping
-# map <- list(eta = factor(diag_indices))
-
-map <- NULL
-
-obj = MakeADFun(nll, par, map = map)
-opt = nlminb(obj$par, obj$fn, obj$gr)
-
-mod = obj$report()
-(Delta = mod$delta)
-(Gamma = mod$Gamma)
-allprobs = mod$allprobs
-trackID = mod$trackID
-(alpha = mod$alpha)
-
-probs = stateprobs(mod = mod)
-colnames(probs) = paste0("attacker_", 1:n_att)
-probs = cbind(ID = trackID, probs)
-
-probs = (split(as.data.frame(probs), probs[,1]))[as.character(unique(probs[,1]))]
-probs = lapply(probs, as.matrix)
-
-# Function to calculate entropy
-calculate_entropy <- function(Z) {
-  Z <- Z[Z > 0]  # Remove zero values
-  entropy <- -sum(Z * log(Z))  # Calculate entropy
-  return(entropy)
-}
-
-analyze_data <- function(df) {
-  # Convert columns 2 to 6 to numeric values
-  numeric_values <- apply(df[, 2:6], 2, function(col) as.numeric(as.character(col)))
-  
-  # Handle missing values (NA) if conversion fails
-  if (anyNA(numeric_values)) {
-    warning("There are NA values after the conversion. Please check!")
-  }
-  #
-  # if(nrow(numeric_values) > 3){
-  # numeric_values = numeric_values[-c(1:2),] # Delete the first 5 rows that can occur due to incorrect assignments
-  # }
-  
-  sd = mean(apply(numeric_values, 2, sd))
-  # Determine the maximum value per row
-  max_values <- apply(numeric_values, 1, which.max)
-  
-  # Calculate the number of changes in the maximum value
-  changes <- sum(c(NA, diff(max_values)) != 0, na.rm = TRUE)
-  
-  # Calculate Zn(j, k): The proportion of time points where each attacker was covered
-  Zn <- table(factor(max_values, levels = 1:5)) / nrow(df)
-  
-  # Calculate the defensive entropy
-  entropy <- calculate_entropy(Zn)
-  
-  # Return results as a list
-  data.frame(sd = sd, num_changes = changes, entropy = entropy)
-}
-
-results_df <- do.call(rbind, lapply(probs, analyze_data))
-results_df$gameId = str_sub(rownames(results_df), 1, 10)
-results_df$playId = str_sub(rownames(results_df), 11, str_length(rownames(results_df))-5)
-
-res_df = results_df %>% group_by(gameId, playId) %>% 
-  mutate(player_change = ifelse(num_changes > 0, 1, 0)) %>% 
-  summarize(average = mean(num_changes),
-            sum = sum(num_changes),
-            nr_player_changes = sum(player_change), 
-            average_sd = mean(sd),
-            average_ent = mean(entropy))
-
-res_df = merge(plays, res_df, by = c("gameId", "playId"))
-
-res_df = res_df %>% filter(pff_manZone != "Other")
-
-# Visualize the frequency of categories by group
-ggplot(res_df %>% filter(pff_manZone != "Other"), aes(x = nr_player_changes, fill = pff_manZone)) +
-  geom_bar(position = "dodge", aes(y = ..prop.., group = pff_manZone)) + # ..prop.. calculates relative frequency
-  labs(title = "Relative Frequency of Categories by Group", 
-       x = "Category", 
-       y = "Relative Frequency") +
-  scale_y_continuous(labels = scales::percent) + # Percent format on the y-axis
-  theme_minimal()
-
-ggplot(res_df %>% filter(pff_manZone != "Other"), aes(x = sum, fill = pff_manZone)) +
-  geom_bar(position = "dodge", aes(y = ..prop.., group = pff_manZone)) + # ..prop.. calculates relative frequency
-  labs(title = "Relative Frequency of Categories by Group", 
-       x = "Category", 
-       y = "Relative Frequency") +
-  scale_y_continuous(labels = scales::percent) + # Percent format on the y-axis
-  theme_minimal()
-
-ggplot(res_df %>% filter(pff_manZone != "Other"), aes(x = average_sd, fill = pff_manZone)) +
-  geom_histogram(aes(y = ..density..), position = "dodge", alpha = 0.7, binwidth = 0.01) +
-  labs(title = "Relative Frequency of Categories by Group", 
-       x = "Value of average_sd", 
-       y = "Relative Frequency (Density)") +
-  scale_y_continuous(labels = scales::percent) + # Percent format on the y-axis
-  theme_minimal()
-
-ggplot(res_df %>% filter(pff_manZone != "Other"), aes(x = average_ent, fill = pff_manZone)) +
-  geom_histogram(aes(y = ..density..), position = "dodge", alpha = 0.7, binwidth = 0.01) +
-  labs(title = "Relative Frequency of Categories by Group", 
-       x = "Value of average_ent", 
-       y = "Relative Frequency (Density)") +
-  scale_y_continuous(labels = scales::percent) + # Percent format on the y-axis
-  theme_minimal()
-
-res_df$day = str_sub(res_df$gameId, 1, 8)
-days = unique(res_df$day)
-res_df = res_df %>% filter(day %in% days[7:11])
-
-pl_data = res_df %>% filter(pff_manZone != "Other")
-plot(pl_data$average_ent, as.factor(pl_data$pff_manZone))
-
-par(mfrow = c(1,2))
-boxplot(pl_data$average_ent[which(pl_data$pff_manZone != "Zone")], ylim = c(0,1))
-boxplot(pl_data$average_ent[which(pl_data$pff_manZone == "Zone")], ylim = c(0,1))
-
-mod_log = glm(as.factor(pff_manZone) ~ average_ent, data = pl_data, family = "binomial")
-summary(mod_log)
-
-
-
-
-# Model with random effects for teams -------------------------------------
-# and distance effect
-
-# library(Matrix)
 
 data$club <- as.factor(data$club)
 data$pos <- as.factor(data$position)
@@ -472,10 +268,6 @@ n_clubs <- length(unique(data$club))
 n_pos <- length(unique(data$position))
 data$club_num <- as.integer(data$club)
 data$pos_num <- as.integer(data$pos)
-
-# modmat <- make_matrices(~ s(club, bs = "re") + s(pos, bs = "re"), data = data)
-# Z <- Matrix(modmat$Z, sparse = TRUE)
-# Z2 <- modmat$Z
 
 dat = list(y_pos = data$y,
            X = as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att]),
@@ -487,99 +279,105 @@ dat = list(y_pos = data$y,
            n_att = n_att, 
            Delta = as.matrix(Deltas))
 
+# Initialising random coefficients with nice names
+beta_pos0 = rep(0, n_pos)
+names(beta_pos0) <- unique(data$pos)
+beta_club0 = rep(0, n_clubs)
+names(beta_club0) <- unique(data$club)
+
 par = list(beta0 = -5,
            beta_dist = 0,
-           beta_club = rep(0, n_clubs),
-           beta_pos = rep(0, n_pos),
+           beta_club = beta_club0,
+           beta_pos = beta_pos0,
            logsigma = log(2),
-           logsigma_club = log(0.1),
-           logsigma_pos = log(0.1))
+           logsigma_club = log(0.2),
+           logsigma_pos = log(0.2))
 
 jnll = function(par){
   getAll(par, dat)
   
-  # linear predictor
-  Eta <- beta0 + beta_dist * dist_mat + # distance
+  # Linear predictor matrix
+  Eta <- beta0 + beta_dist * dist_mat + # distance covariate
     beta_club[club_num] + beta_pos[pos_num] # random effects
-  Gamma <- tpm_g3(Eta); REPORT(beta)
+  REPORT(beta0); REPORT(beta_dist)
+  REPORT(beta_club); REPORT(beta_pos)
   
-  REPORT(Gamma)
-  REPORT(beta_club)
-  REPORT(beta_pos)
+  Gamma <- tpm_g(Eta = Eta)
   
   sigma <- exp(logsigma); REPORT(sigma)
   sigma_club <- exp(logsigma_club); REPORT(sigma_club)
   sigma_pos <- exp(logsigma_pos); REPORT(sigma_pos)
   
+  # Matrix of state-dependent densities
   allprobs <- matrix(1, length(y_pos), n_att)
   ind <- which(!is.na(y_pos))
   for(j in 1:n_att){
     allprobs[ind,j] = dnorm(y_pos, X[,j], sigma)
   }
   
-  nll <- -forward_g(Delta, Gamma[,,club_num], allprobs,
-                    trackID = ID, report = FALSE)
+  # HMM likelihood
+  nll <- -forward_g(Delta, Gamma, allprobs, trackID = ID)
   
-  REPORT(allprobs)
-  
-  # club random effect likelihood
+  # Club random effect likelihood
   nll <- nll - sum(dnorm(beta_club, 0, sigma_club, log = TRUE))
   
-  # pos random effect likelihood
+  # Position random effect likelihood
   nll <- nll - sum(dnorm(beta_pos, 0, sigma_pos, log = TRUE))
   
   nll
 }
 
-
 TMB::config(tmbad.sparse_hessian_compress = TRUE)
 TapeConfig(matmul = "plain") # essential to get sparsity in matrix mult
 
-obj2 <- MakeADFun(jnll, par, random = c("beta_club", "beta_pos"))
+obj <- MakeADFun(jnll, par, random = c("beta_club", "beta_pos"))
 print("done")
 
 # H <- obj2$env$spHess(random = TRUE)
 # SparseM::image(H)
 
 system.time(
-  opt2 <- nlminb(obj2$par, obj2$fn, obj2$gr)
+  opt <- nlminb(obj$par, obj$fn, obj$gr)
 )
 
-mod2 <- obj2$report()
+mod <- obj$report()
+sdr <- sdreport(obj)
+mod$sdr <- sdr
 
-sdr <- sdreport(obj2)
-
-saveRDS(mod2, "./results/mod200_w_dist.rds")
+saveRDS(mod, "./results/mod_500plays_w_dist.rds")
 
 
 # saveRDS(mod2, "./results/mod_full.rds")
 # saveRDS(mod2, "./results/mod_w5to9.rds")
 
-mod_full <- readRDS("./results/mod_full.rds")
+# mod_full <- readRDS("./results/mod_full.rds")
 
+mod_full <- readRDS("./results/mod_1000plays_w_dist_full.rds")
+
+stateprobs_mat <- stateprobs_g(dat$Delta, mod_full$Gamma, mod_full$allprobs, dat$ID)
 
 # state decoding
 
-stateprobs <- list()
+# stateprobs <- list()
 
-uID <- unique(dat$ID)
-i <- 1
-for(id in uID){
-  idx <- which(dat$ID == id)
-  club_i <- dat$club_num[idx[1]]
-  pos_i <- dat$pos_num[idx[1]]
-  
-  stateprobs[[i]] <- stateprobs(dat$Delta[i, ], mod_full$Gamma[,, club_i, pos_i], mod_full$allprobs[idx, ])
-  i <- i + 1
-}
+# uID <- unique(dat$ID)
+# i <- 1
+# for(id in uID){
+#   idx <- which(dat$ID == id)
+#   club_i <- dat$club_num[idx[1]]
+#   pos_i <- dat$pos_num[idx[1]]
+#   
+#   stateprobs[[i]] <- stateprobs(dat$Delta[i, ], mod_full$Gamma[,, club_i, pos_i], mod_full$allprobs[idx, ])
+#   i <- i + 1
+# }
 
 # turn into matrix
-stateprobs_mat <- do.call(rbind, stateprobs)
+# stateprobs_mat <- do.call(rbind, stateprobs)
 colnames(stateprobs_mat) <- paste0("attacker_", 1:n_att)
 stateprobs_df <- as.data.frame(stateprobs_mat)
 
-saveRDS(stateprobs_df, "./results/stateprobs_full.rds")
-saveRDS(stateprobs_mat, "./results/stateprobs_full_mat.rds")
+saveRDS(stateprobs_df, "./results/stateprobs_1000plays_w_dist.rds")
+# saveRDS(stateprobs_mat, "./results/stateprobs_full_mat.rds")
 
 
 
