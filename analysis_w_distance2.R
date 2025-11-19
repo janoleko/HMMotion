@@ -198,7 +198,7 @@ data <- read.csv(here("rawdata/large", "final_preprocessed_all_weeks_lag4.csv"))
 # smaller data
 game_play_ids <- unique(data$game_play_id)
 set.seed(134)
-w <- sample(1:length(game_play_ids), 200)
+w <- sample(1:length(game_play_ids), 100)
 data <- data[which(data$game_play_id %in% game_play_ids[w]), ] # smaller data set
 
 
@@ -241,20 +241,29 @@ Deltas <- do.call(rbind, lapply(split(data, data$uniId)[as.character(unique(data
 ### Computing pairwise distances between attackers
 Att_y <- as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att])
 
-# All ordered pairs i != j
-pairs <- expand.grid(i = 1:n_att, j = 1:n_att)
-pairs <- pairs[pairs$i != pairs$j, ]  # remove i == j
+# Compute distances for each pair only
+dist_mat <- matrix(NA, nrow = nrow(data), ncol = n_att * (n_att-1) / 2)
+nms <- rep(NA, ncol(dist_mat))
+m <- 1
+for(i in 1:n_att) {
+  for(j in 1:n_att) {
+    if(j > i) {
+      dist_mat[, m] <- abs(Att_y[, j] - Att_y[, i])
+      nms[m] <- paste0("dist_y_", j, "_", i)
+      m <- m + 1
+    }
+  }
+}
+colnames(dist_mat) <- nms
 
-# Compute distances
-dist_mat <- sapply(1:nrow(pairs), function(k) {
-  i <- pairs$i[k]
-  j <- pairs$j[k]
-  abs(Att_y[, i] - Att_y[, j])
-})
+# for indexing, so that we only have one distance per pair (i,j)
+dist_idx <- matrix(0, nrow = n_att, ncol = n_att)
+dist_idx[lower.tri(dist_idx)] <- 1:ncol(dist_mat)
+dist_idx <- dist_idx + t(dist_idx)
+dist_idx <- as.vector(dist_idx)
+dist_idx <- dist_idx[dist_idx != 0]
 
-# Name the columns
-colnames(dist_mat) <- paste0("dist_y_", pairs$i, "_", pairs$j)
-head(dist_mat)
+head(dist_mat[, dist_idx], 3)
 
 rm(Att_y, pairs) # memory cleanup
 gc()
@@ -273,6 +282,7 @@ data$play_num <- as.integer(as.factor(data$game_play_id))
 dat = list(y_pos = data$y,
            X = as.matrix(data[, which(str_detect(names(data),"player"))[1]-1 + n_att + 1:n_att]),
            dist_mat = dist_mat,
+           dist_idx = dist_idx,
            ID = data$uniId,
            n_clubs = n_clubs,
            club_num = data$club_num,
@@ -286,41 +296,48 @@ beta_pos0 = rep(0, n_pos)
 names(beta_pos0) <- unique(data$pos)
 beta_club0 = rep(0, n_clubs)
 names(beta_club0) <- unique(data$club)
+beta_play0 = rep(0, length(unique(data$play_num)))
+names(beta_play0) <- unique(data$game_play_id)
 
 par = list(beta0 = -5,
            beta_dist = 0,
            beta_club = beta_club0,
            beta_pos = beta_pos0,
-           beta_play = rep(0, length(unique(data$play_num))),
+           beta_play = beta_play0,
            logsigma = log(2),
            logsigma_club = log(0.2),
-           logsigma_pos = log(0.2))
+           logsigma_pos = log(0.2),
+           logsigma_play = log(0.1))
 
 jnll = function(par){
   getAll(par, dat)
   
   # Linear predictor matrix
-  Eta <- beta0 + beta_dist * dist_mat + # distance covariate
-    beta_club[club_num] + beta_pos[pos_num] + # random effects
-    beta_play[play_num]
+  Eta <- beta0 + 
+    beta_dist * dist_mat[, dist_idx] + # distance covariate
+    beta_club[club_num] + # team random effect
+    beta_pos[pos_num] + # position random effect
+    beta_play[play_num] # play random effect
+  
   REPORT(beta0); REPORT(beta_dist)
-  REPORT(beta_club); REPORT(beta_pos)
+  REPORT(beta_club); REPORT(beta_pos); REPORT(beta_play)
   
   Gamma <- tpm_g(Eta = Eta)
   
   sigma <- exp(logsigma); REPORT(sigma)
   sigma_club <- exp(logsigma_club); REPORT(sigma_club)
   sigma_pos <- exp(logsigma_pos); REPORT(sigma_pos)
+  sigma_play <- exp(logsigma_play); REPORT(sigma_play)
   
   # Matrix of state-dependent densities
-  allprobs <- matrix(1, length(y_pos), n_att)
+  logallprobs <- matrix(0, length(y_pos), n_att)
   ind <- which(!is.na(y_pos))
   for(j in 1:n_att){
-    allprobs[ind,j] = dnorm(y_pos, X[,j], sigma)
+    logallprobs[ind,j] = dnorm(y_pos, X[,j], sigma, log = TRUE)
   }
   
   # HMM likelihood
-  nll <- -forward_g(Delta, Gamma, allprobs, trackID = ID)
+  nll <- -forward_g(Delta, Gamma, logallprobs, trackID = ID, logspace = TRUE)
   
   # Club random effect likelihood
   nll <- nll - sum(dnorm(beta_club, 0, sigma_club, log = TRUE))
@@ -328,13 +345,17 @@ jnll = function(par){
   # Position random effect likelihood
   nll <- nll - sum(dnorm(beta_pos, 0, sigma_pos, log = TRUE))
   
+  # Play random effect likelihood
+  nll <- nll - sum(dnorm(beta_play, 0, sigma_play, log = TRUE))
+  
   nll
 }
 
 TMB::config(tmbad.sparse_hessian_compress = TRUE)
 TapeConfig(matmul = "plain") # essential to get sparsity in matrix mult
 
-obj <- MakeADFun(jnll, par, random = c("beta_club", "beta_pos"))
+obj <- MakeADFun(jnll, par, 
+                 random = c("beta_club", "beta_pos", "beta_play"))
 print("done")
 
 # H <- obj2$env$spHess(random = TRUE)
@@ -348,90 +369,4 @@ mod <- obj$report()
 sdr <- sdreport(obj)
 mod$sdr <- sdr
 
-saveRDS(mod, "./results/mod_500plays_w_dist.rds")
-
-
-# saveRDS(mod2, "./results/mod_full.rds")
-# saveRDS(mod2, "./results/mod_w5to9.rds")
-
-# mod_full <- readRDS("./results/mod_full.rds")
-
-mod_full <- readRDS("./results/mod_1000plays_w_dist_full.rds")
-
-stateprobs_mat <- stateprobs_g(dat$Delta, mod_full$Gamma, mod_full$allprobs, dat$ID)
-
-# state decoding
-
-# stateprobs <- list()
-
-# uID <- unique(dat$ID)
-# i <- 1
-# for(id in uID){
-#   idx <- which(dat$ID == id)
-#   club_i <- dat$club_num[idx[1]]
-#   pos_i <- dat$pos_num[idx[1]]
-#   
-#   stateprobs[[i]] <- stateprobs(dat$Delta[i, ], mod_full$Gamma[,, club_i, pos_i], mod_full$allprobs[idx, ])
-#   i <- i + 1
-# }
-
-# turn into matrix
-# stateprobs_mat <- do.call(rbind, stateprobs)
-colnames(stateprobs_mat) <- paste0("attacker_", 1:n_att)
-stateprobs_df <- as.data.frame(stateprobs_mat)
-
-saveRDS(stateprobs_df, "./results/stateprobs_1000plays_w_dist.rds")
-# saveRDS(stateprobs_mat, "./results/stateprobs_full_mat.rds")
-
-
-
-mod14 <- readRDS("./results/mod_w1to4.rds")
-mod59 <- readRDS("./results/mod_w5to9.rds")
-
-names(mod14$beta_pos) <- levels(data$pos)
-names(mod59$beta_pos) <- levels(data$pos)
-
-rbind(mod14$beta_pos, mod59$beta_pos)
-
-names(mod14$beta_club) <- levels(data$club)
-names(mod59$beta_club) <- levels(data$club)
-
-rbind(mod14$beta_club, mod59$beta_club)
-
-plot(mod14$beta_club, mod59$beta_club)
-abline(0,1)
-
-mod <- lm(mod59$beta_club ~ mod14$beta_club)
-
-mod2$sigma_club
-mod2$sigma_pos
-Gamma <- mod2$Gamma
-
-gammas <- Gamma[1,1,,]
-
-summary(as.vector(gammas))
-
-
-# sdr <- sdreport(obj2, ignore.parm.uncertainty = TRUE)
-# par_est <- as.list(sdr, "Est")
-
-# beta_club <- par_est$beta_club
-beta_club <- mod2$beta_club
-names(beta_club) <- levels(data$club)
-# beta_pos <- par_est$beta_pos
-beta_pos <- mod2$beta_pos
-names(beta_pos) <- levels(data$pos)
-
-
-which.min(gammas)
-which.max(gammas)
-
-data$club[which(data$club_num == 14)[1]]
-data$club[which(data$club_num == 30)[1]]
-
-dim(mod2$Gamma)
-nrow(mod2$allprobs)
-dim(mod2$delta)
-
-# decoding muss in Schleife wie in likelihood passieren
-
+stateprobs <- stateprobs_g(mod = mod)
