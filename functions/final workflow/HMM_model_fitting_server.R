@@ -3,6 +3,10 @@
 ###################################################################
 # Packages ----------------------------------------------------------------
 
+## installation from source to enable hessian compression
+devtools::install_github("kaskr/adcomp", subdir = "TMB")
+devtools::install_github("kaskr/RTMB", subdir = "RTMB")
+
 library(dplyr)
 library(tidyverse)
 #devtools::install_github("janoleko/LaMa")
@@ -455,7 +459,7 @@ dist_idx <- dist_idx[dist_idx != 0]
 
 head(dist_mat[, dist_idx], 3)
 
-rm(Att_y, pairs) # memory cleanup
+rm(Att_y) # memory cleanup
 gc()
 
 
@@ -542,7 +546,6 @@ jnll = function(par){
 }
 
 TMB::config(tmbad.sparse_hessian_compress = TRUE)
-TapeConfig(matmul = "plain") # essential to get sparsity in matrix mult
 
 obj <- MakeADFun(jnll, par, 
                  random = c("beta_club", "beta_pos", "beta_play"))
